@@ -43,8 +43,9 @@ public class RetryControl
 
     private RetryControl(Config config, Config stateParams, boolean enableByDefault)
     {
+        // Remove command status so that pollable command executors can retry
+        this.stateParams = stateParams.remove("commandStatus");
 
-        this.stateParams = stateParams;
         this.retryCount = stateParams.get("retry_count", int.class, 0);
 
         final JsonNode retryNode = config.getInternalObjectNode().get("_retry");

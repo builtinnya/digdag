@@ -115,9 +115,6 @@ public class ShOperatorFactory
             if (status.isFinished()) {
                 final int statusCode = status.getStatusCode();
                 if (statusCode != 0) {
-                    // Remove the polling state after fetching the result so that the result fetch can be retried
-                    // without resubmitting the code.
-                    state.remove("commandStatus");
                     throw new RuntimeException("Command failed with code " + statusCode);
                 }
                 return;
