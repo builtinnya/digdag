@@ -1,6 +1,8 @@
 package io.digdag.standards.command;
 
 import com.amazonaws.services.ecs.model.Container;
+import com.amazonaws.services.ecs.model.Failure;
+import com.amazonaws.services.ecs.model.RunTaskResult;
 import com.amazonaws.services.ecs.model.Task;
 import com.amazonaws.services.ecs.model.TaskSetNotFoundException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +16,7 @@ import io.digdag.spi.CommandContext;
 import io.digdag.spi.CommandLogger;
 import io.digdag.spi.CommandRequest;
 import io.digdag.spi.CommandStatus;
+import io.digdag.spi.TaskExecutionException;
 import io.digdag.spi.TaskRequest;
 import io.digdag.standards.command.ecs.EcsClient;
 import io.digdag.standards.command.ecs.EcsClientConfig;
@@ -183,6 +186,61 @@ public class EcsCommandExecutorTest
             }
             catch (Exception e) {
                 fail("Unexpected Exception happened. " + e.toString());
+            }
+        }
+    }
+
+    @Test
+    public void testFindTask()
+            throws Exception
+    {
+
+        final EcsCommandExecutor executor = spy(new EcsCommandExecutor(
+                systemConfig, ecsClientFactory, dockerCommandExecutor,
+                storageManager, projectArchiveLoader, commandLogger));
+        final String taskDefinitionArn = "my_task_definition_arn";
+        final RunTaskResult taskResult = mock(RunTaskResult.class);
+
+        {
+            // Task found
+            Task task = mock(Task.class);
+            doReturn(taskDefinitionArn).when(task).getTaskDefinitionArn();
+            doReturn(Arrays.asList(task)).when(taskResult).getTasks();
+            doReturn(Arrays.asList()).when(taskResult).getFailures();
+            Task foundTask = executor.findTask(taskDefinitionArn, taskResult);
+            assertThat(foundTask.getTaskDefinitionArn(), is(taskDefinitionArn));
+        }
+        {
+            // Submitted task not found
+            doReturn(Arrays.asList()).when(taskResult).getTasks();
+            doReturn(Arrays.asList()).when(taskResult).getFailures();
+            try {
+                executor.findTask(taskDefinitionArn, taskResult);
+                fail("Test failed without RuntimeException");
+            }
+            catch (RuntimeException ex) {
+                assertThat(ex.getMessage(), is("Submitted task could not be found"));
+            }
+            catch (Exception ex) {
+                fail("Unexpected Exception happened. " + ex.toString());
+            }
+        }
+        {
+            // AGENT error occurred: ECS agent is disconnected
+            Failure failure = mock(Failure.class);
+            doReturn("AGENT").when(failure).getReason();
+            doReturn(Arrays.asList(failure)).when(taskResult).getFailures();
+            doReturn(Arrays.asList()).when(taskResult).getTasks();
+            try {
+                executor.findTask(taskDefinitionArn, taskResult);
+                fail("Test failed without TaskExecutionException");
+            }
+            catch (TaskExecutionException ex) {
+                assertThat(ex.isError(), is(false));
+                assertThat(ex.getRetryInterval().isPresent(), is(true));
+            }
+            catch (Exception ex) {
+                fail("Unexpected Exception happened. " + ex.toString());
             }
         }
     }

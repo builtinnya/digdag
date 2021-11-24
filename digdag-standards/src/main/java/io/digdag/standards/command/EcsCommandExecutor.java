@@ -5,6 +5,7 @@ import com.amazonaws.services.ecs.model.AwsVpcConfiguration;
 import com.amazonaws.services.ecs.model.CapacityProviderStrategyItem;
 import com.amazonaws.services.ecs.model.ContainerDefinition;
 import com.amazonaws.services.ecs.model.ContainerOverride;
+import com.amazonaws.services.ecs.model.Failure;
 import com.amazonaws.services.ecs.model.KeyValuePair;
 import com.amazonaws.services.ecs.model.LaunchType;
 import com.amazonaws.services.ecs.model.LogConfiguration;
@@ -28,6 +29,7 @@ import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.inject.Inject;
 import io.digdag.client.config.Config;
+import io.digdag.client.config.ConfigElement;
 import io.digdag.client.config.ConfigException;
 import io.digdag.core.archive.ProjectArchiveLoader;
 import io.digdag.core.archive.ProjectArchives;
@@ -38,6 +40,7 @@ import io.digdag.spi.CommandExecutor;
 import io.digdag.spi.CommandLogger;
 import io.digdag.spi.CommandRequest;
 import io.digdag.spi.CommandStatus;
+import io.digdag.spi.TaskExecutionException;
 import io.digdag.spi.TaskRequest;
 import io.digdag.standards.command.ecs.EcsClient;
 import io.digdag.standards.command.ecs.EcsClientConfig;
@@ -70,6 +73,7 @@ public class EcsCommandExecutor
 
     private static final String ECS_COMMAND_EXECUTOR_SYSTEM_CONFIG_PREFIX = "agent.command_executor.ecs.";
     private static final String ECS_END_OF_TASK_LOG_MARK = "--RWNzQ29tbWFuZEV4ZWN1dG9y--"; // base64("EcsCommandExecutor")
+    private static final int RETRY_INTERVAL_ON_AGENT_DISCONNECTED = 1;
 
     private static final String CONFIG_RETRY_TASK_SCRIPTS_DOWNLOADS = ECS_COMMAND_EXECUTOR_SYSTEM_CONFIG_PREFIX + "retry_task_scripts_downloads";
     private static final String CONFIG_RETRY_TASK_OUTPUT_UPLOADS = ECS_COMMAND_EXECUTOR_SYSTEM_CONFIG_PREFIX + "retry_task_output_uploads";
@@ -117,9 +121,9 @@ public class EcsCommandExecutor
             final EcsClientConfig clientConfig = createEcsClientConfig(clusterName, systemConfig, taskConfig); // ConfigException
             try (final EcsClient client = ecsClientFactory.createClient(clientConfig)) { // ConfigException
                 final TaskDefinition td = findTaskDefinition(commandContext, client, taskConfig); // ConfigException
-                // When RuntimeException is thrown by submitTask method, it will be handled and retried by BaseOperator, which is one of base
-                // classes of operator implementation.
-                final Task runTask = submitTask(commandContext, commandRequest, client, td); // ConfigException, RuntimeException
+                // When RuntimeException or TaskExecutionException is thrown by submitTask method,
+                // it will be handled and retried by BaseOperator, which is one of base classes of operator implementation.
+                final Task runTask = submitTask(commandContext, commandRequest, client, td); // ConfigException, RuntimeException, TaskExecutionException
                 final Optional<ObjectNode> awsLogs = getAwsLogsConfiguration(td, runTask.getTaskArn()); // Nullable, ConfigException
 
                 final ObjectNode currentStatus = createCurrentStatus(commandRequest, clientConfig, runTask, awsLogs);
@@ -144,7 +148,7 @@ public class EcsCommandExecutor
         logger.debug("Submit task request:" + dumpTaskRequest(runTaskRequest));
         final RunTaskResult runTaskResult = client.submitTask(runTaskRequest); // RuntimeException, ConfigException
         logger.debug("Submit task response:" + dumpTaskResult(runTaskResult));
-        return findTask(td.getTaskDefinitionArn(), runTaskResult); // RuntimeException
+        return findTask(td.getTaskDefinitionArn(), runTaskResult); // RuntimeException, TaskExecutionException
     }
 
     protected TaskDefinition findTaskDefinition(
@@ -536,11 +540,20 @@ public class EcsCommandExecutor
         }
     }
 
+    @VisibleForTesting
     protected Task findTask(final String taskDefinitionArn, final RunTaskResult result)
     {
         for (final Task t : result.getTasks()) {
             if (t.getTaskDefinitionArn().equals(taskDefinitionArn)) {
                 return t;
+            }
+        }
+        for (final Failure f : result.getFailures()) {
+            if (f.getReason().equals("AGENT")) {
+                // An ECS agent on the container instance is currently disconnected.
+                // The agent disconnects several times per hour as a part of its normal operation
+                // so we should retry the task in that case.
+                throw TaskExecutionException.ofNextPolling(RETRY_INTERVAL_ON_AGENT_DISCONNECTED, ConfigElement.empty());
             }
         }
         throw new RuntimeException("Submitted task could not be found"); // TODO the message should be improved more understandably.
