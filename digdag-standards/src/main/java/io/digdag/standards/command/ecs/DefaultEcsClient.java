@@ -64,7 +64,7 @@ public class DefaultEcsClient
             final AmazonECSClient client,
             final AWSLogs logs)
     {
-        this(config, client, logs, 60, 10, 50, 10, 3);
+        this(config, client, logs, 5, 10, 50, 10, 3);
     }
 
     protected DefaultEcsClient(
